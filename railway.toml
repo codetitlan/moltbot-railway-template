@@ -1,10 +1,22 @@
-[build]
-builder = "dockerfile"
-
-[deploy]
-healthcheckPath = "/setup/healthz"
-healthcheckTimeout = 300
-restartPolicyType = "on_failure"
-
-[variables]
-PORT = "8080"
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "runtime": "V2",
+    "numReplicas": 1,
+    "healthcheckPath": "/setup/healthz",
+    "sleepApplication": false,
+    "useLegacyStacker": false,
+    "multiRegionConfig": {
+      "us-west2": {
+        "numReplicas": 1
+      }
+    },
+    "restartPolicyType": "ON_FAILURE",
+    "healthcheckTimeout": 300,
+    "restartPolicyMaxRetries": 10
+  }
+}
