@@ -21,7 +21,7 @@ RUN corepack enable
 WORKDIR /moltbot
 
 # Pin to a known ref (tag/branch). If it doesn't exist, fall back to main.
-ARG MOLTBOT_GIT_REF=main
+ARG MOLTBOT_GIT_REF=v2026.1.24
 RUN git clone --depth 1 --branch "${MOLTBOT_GIT_REF}" https://github.com/moltbot/moltbot.git .
 
 # Patch: relax version requirements for packages that may reference unpublished versions.
