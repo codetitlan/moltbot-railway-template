@@ -8,3 +8,5 @@ restartPolicyType = "on_failure"
 
 [variables]
 PORT = "8080"
+CLAWDBOT_MODEL = "x-ai/grok-4.1-fast"
+CLAWDBOT_PROVIDER = "openrouter"
