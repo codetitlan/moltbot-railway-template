@@ -1,10 +1,8 @@
 [build]
 builder = "dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-healthcheckPath = "/setup/healthz"
-healthcheckTimeout = 300
+startCommand = "node src/server.js"
 restartPolicyType = "on_failure"
-
-[variables]
-PORT = "8080"
+restartPolicyMaxRetries = 10
