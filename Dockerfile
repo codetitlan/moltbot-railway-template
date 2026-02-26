@@ -1,6 +1,5 @@
 # Build openclaw from source to avoid npm packaging gaps (some dist files are not shipped).
 FROM node:22-bookworm AS openclaw-build
-
 # Dependencies needed for openclaw build
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -11,30 +10,48 @@ RUN apt-get update \
     make \
     g++ \
   && rm -rf /var/lib/apt/lists/*
-
 # Install Bun (openclaw build uses it)
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
-
 RUN corepack enable
-
 WORKDIR /openclaw
-
 # OpenClaw version control:
-# - Set OPENCLAW_VERSION Railway variable to use a specific tag (e.g., v2026.2.15)
-# - If not set, defaults to main branch (original behavior)
+# - Set OPENCLAW_VERSION Railway variable to pin a specific tag/branch (e.g., v2026.2.15)
+# - If not set, auto-detects the latest stable release via 3-tier cascade:
+#     1. GitHub Releases API (/releases/latest) — excludes pre-releases and drafts
+#     2. git ls-remote --sort=-v:refname — latest stable tag by version sort
+#     3. main branch (final fallback, with warning — may be unstable)
 # - Can also override locally with --build-arg OPENCLAW_VERSION=<tag>
 ARG OPENCLAW_VERSION
 RUN set -eu; \
   if [ -n "${OPENCLAW_VERSION:-}" ]; then \
     REF="${OPENCLAW_VERSION}"; \
-    echo "✓ Using OpenClaw ${REF}"; \
+    echo "✓ Using pinned OpenClaw ${REF}"; \
   else \
-    REF="main"; \
-    echo "⚠ OPENCLAW_VERSION not set, using main branch (may be unstable)"; \
+    echo "OPENCLAW_VERSION not set — auto-detecting latest stable release..."; \
+    REF=$(curl -sf --max-time 10 \
+      "https://api.github.com/repos/openclaw/openclaw/releases/latest" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])" \
+      2>/dev/null) || REF=""; \
+    if [ -n "$REF" ]; then \
+      echo "✓ GitHub API: latest stable release is ${REF}"; \
+    else \
+      echo "⚠ GitHub API unavailable — falling back to git ls-remote tag detection"; \
+      REF=$(git ls-remote --tags --sort=-v:refname \
+        https://github.com/openclaw/openclaw.git 'v*' \
+        | grep -v '\^{}' \
+        | grep -v -- '-' \
+        | head -1 \
+        | sed 's|.*refs/tags/||') || REF=""; \
+      if [ -n "$REF" ]; then \
+        echo "✓ git ls-remote: latest stable tag is ${REF}"; \
+      else \
+        echo "⚠ Tag detection also failed — falling back to main branch (unstable)"; \
+        REF="main"; \
+      fi; \
+    fi; \
   fi; \
   git clone --depth 1 --branch "${REF}" https://github.com/openclaw/openclaw.git .
-
 # Patch: relax version requirements for packages that may reference unpublished versions.
 # Apply to all extension package.json files to handle workspace protocol (workspace:*).
 RUN set -eux; \
@@ -42,61 +59,65 @@ RUN set -eux; \
     sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*">=[^"]+"/"openclaw": "*"/g' "$f"; \
     sed -i -E 's/"openclaw"[[:space:]]*:[[:space:]]*"workspace:[^"]+"/"openclaw": "*"/g' "$f"; \
   done
-
 RUN pnpm install --no-frozen-lockfile
 RUN pnpm build
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:install && pnpm ui:build
-
-
 # Runtime image
 FROM node:22-bookworm
 ENV NODE_ENV=production
-
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    build-essential \
-    gcc \
-    g++ \
-    make \
-    procps \
-    file \
     git \
+    gosu \
+    procps \
     python3 \
-    pkg-config \
-    sudo \
+    build-essential \
   && rm -rf /var/lib/apt/lists/*
 
-# Install Homebrew (must run as non-root user)
-# Create a user for Homebrew installation, install it, then make it accessible to all users
-RUN useradd -m -s /bin/bash linuxbrew \
-  && echo 'linuxbrew ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+# ===== NEW: Install Railway CLI =====
+RUN curl -fsSL https://railway.com/install.sh | bash
 
-USER linuxbrew
-RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-USER root
-RUN chown -R root:root /home/linuxbrew/.linuxbrew
-ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+# ===== NEW: Configure git to use GITHUB_TOKEN for pushing =====
+# This tells git: "whenever you talk to github.com, use my token as the password"
+RUN git config --system credential.helper store \
+  && printf '#!/bin/sh\n\
+if [ -n "$GITHUB_TOKEN" ]; then\n\
+  git config --global url."https://${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"\n\
+fi\n\
+if [ -n "$RAILWAY_TOKEN" ]; then\n\
+  railway version 2>/dev/null || true\n\
+fi\n' > /usr/local/bin/setup-credentials.sh \
+  && chmod +x /usr/local/bin/setup-credentials.sh
 
 WORKDIR /app
-
 # Wrapper deps
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile && pnpm store prune
-
 # Copy built openclaw
 COPY --from=openclaw-build /openclaw /openclaw
-
-# Provide a openclaw executable
+# Provide an openclaw executable
 RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"' > /usr/local/bin/openclaw \
   && chmod +x /usr/local/bin/openclaw
-
 COPY src ./src
-
+COPY entrypoint.sh ./entrypoint.sh
+# Create openclaw user, set up directories, install Homebrew as that user
+RUN useradd -m -s /bin/bash openclaw \
+  && chown -R openclaw:openclaw /app \
+  && mkdir -p /data && chown openclaw:openclaw /data \
+  && mkdir -p /home/linuxbrew/.linuxbrew && chown -R openclaw:openclaw /home/linuxbrew
+USER openclaw
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+ENV PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
+ENV HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
+ENV HOMEBREW_CELLAR="/home/linuxbrew/.linuxbrew/Cellar"
+ENV HOMEBREW_REPOSITORY="/home/linuxbrew/.linuxbrew/Homebrew"
 ENV PORT=8080
 EXPOSE 8080
-CMD ["node", "src/server.js"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD curl -f http://localhost:8080/setup/healthz || exit 1
+USER root
+ENTRYPOINT ["./entrypoint.sh"]
